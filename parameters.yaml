@@ -1,0 +1,265 @@
+# Nishvasa model parameters, with provenance.
+#
+# class: literature | prediction | assumption | measurement
+#   literature   published value, cited
+#   prediction   computed by us from a structure or model
+#   assumption   chosen by us; no source
+#   measurement  measured by us  -- EMPTY THIS SEASON, and the file says so
+#
+# Every number on the Model page should appear here or be derivable from
+# entries here. Where a value was withdrawn or corrected, the old value is
+# kept with a note, because history is useful.
+
+enzymes:
+  gs:
+    organism: Bacillus subtilis subsp. subtilis str. 168
+    uniprot: P12425
+    variant: H195Y
+    assembly: dodecamer, two stacked hexameric rings
+    structures: [4LNK, 4LNF, 4LNI, 4LNN]
+    class: literature
+  ppk2:
+    organism: Sulfurovum lithotrophicum
+    variant: L35F/T144S
+    length_aa: 252
+    assembly: closed-ring tetramer
+    ppk2_class: I            # ADP -> ATP only; keeps AMP out of the pool
+    class: literature
+
+kinetics:
+  # Fisher & Wray (2006), Mg-dependent biosynthetic reaction, Tables 3 and 4
+  gs_h195y:
+    km_glu_mM: {value: 30, error: 3, class: literature}
+    km_atp_mM: {value: 7.0, error: 0.6, class: literature}
+    specific_activity_umol_min_mg: {value: 4.7, error: 0.2, class: literature}
+    ic50_gln_mM: {value: 115, error: 5, class: literature}
+    ki_gln_mM:
+      value: 19.17
+      class: prediction
+      note: >
+        Cheng-Prusoff from IC50 = 115 mM at 150 mM assay glutamate. Quoted as
+        19.2 on the Model page and 19.17 in the Gate 4 working; same number.
+  gs_wild_type:
+    km_glu_mM: {value: 27, error: 2.2, class: literature}
+    km_atp_mM: {value: 2.4, error: 0.1, class: literature}
+    specific_activity_umol_min_mg: {value: 2.7, error: 0.2, class: literature}
+    ic50_gln_mM: {value: 2.4, error: 0.1, class: literature}
+    ki_gln_mM: {value: 0.37, class: prediction}
+  km_nh3_mM:
+    value: 0.4
+    class: assumption
+    swept: [0.2, 0.8]
+    note: >
+      No source located for B. subtilis GS. Generic bacterial value.
+      Previously attributed to Nocek et al. 2008, which is a polyphosphate
+      kinase paper and does not contain it; that attribution is withdrawn.
+      Accounts for 1.1 % of batch-time variance (S12.4).
+  ppk2:
+    specific_activity_umol_min_mg: {value: 283, class: literature}
+    km_adp_mM:
+      value: 0.61
+      class: literature
+      note: measured at 37 C, used uncorrected
+    km_polyp_mM:
+      value: 1.96
+      class: literature
+      note: >
+        Source unverified. Cited to Sun et al. 2021 alongside the other two
+        constants, but not separately confirmed. Check before the freeze.
+  assay_glutamate_mM:
+    value: 150
+    class: prediction
+    note: recovered independently from the published wild-type and H195Y Ki
+
+structural:
+  tien_maxima:
+    class: literature
+    note: >
+      Tien et al. (2013) THEORETICAL maxima, Gly-X-Gly context. An earlier
+      scan used MET 203, SER 130, THR 142 from a different table, which
+      inflated methionine RSA by ~10 % and threonine by ~21 %.
+  availability_rsa_threshold: {value: 0.30, class: assumption}
+  threshold_margin:
+    value: 0.05
+    class: assumption
+    note: positions within this of the cutoff are chain-dependent; report a range
+  crosslinker_span_genipin_A:
+    value: [5.0, 16.0]
+    class: assumption
+    withdrawn: [10.0, 16.0]
+    note: >
+      The LOWER bound is steric, not chemical. A 10 A floor excluded four of
+      six real cross-ring contacts at 8.4-8.5 A. Report the window with every
+      count.
+  biological_interface_min_area_A2: {value: 800, class: literature}
+  gs_pore_requirement_A:
+    value: 117
+    class: prediction
+    note: end-on entry of the dodecamer plus ~3 A van der Waals
+
+transport:
+  # Physical constants. None is a project result; all are tabulated values
+  # or straightforward conversions, and the sensitivity analysis finds each
+  # accounts for 0.1 % or less of output variance (S12.4).
+  d_atp_free_m2_s: {value: 3.7e-10, class: literature}
+  d_nh3_free_m2_s: {value: 1.6e-9, class: literature}
+  gel_retardation_factor:
+    value: 0.5
+    range: [0.3, 0.8]
+    class: assumption
+    note: >
+      Multiplies the free diffusivity to give the in-gel value. The resulting
+      D_ATP,gel of 1.9e-10 is stated rather than fitted; a previous version
+      fitted it, which made the effectiveness factor an input.
+  d_nh3_air_m2_s: {value: 2.3e-5, class: literature}
+  henry_constant_dimensionless:
+    value: 1443
+    class: literature
+    note: at 25 C; not corrected to the 32 C brooding temperature
+  sherwood_number:
+    value: 3.0
+    class: assumption
+    note: laminar correlation; 0.0 % of variance in S12.4
+  air_viscosity_Pa_s: {value: 1.84e-5, class: literature}
+  air_density_kg_m3: {value: 1.184, class: literature}
+  nh3_ppm_to_mol_m3:
+    value: 4.087e-5
+    class: prediction
+    note: ideal gas, 25 C, 1 atm
+
+immobilisation:
+  retained_activity_rho:
+    value: 0.5
+    range: [0.3, 0.7]
+    class: assumption
+    note: >
+      Literature band for enzymes on chitosan. Multiplies every device rate.
+      With loading, specific activity and coating thickness it accounts for
+      68 % of batch-time variance (S12.4). The single highest-value
+      measurement outstanding.
+  gs_ppk2_ratio:
+    value: 4.0
+    class: prediction
+    note: >
+      Design intent, not an achieved value. Derived in Gate 3 from two
+      measured specific activities. Differential adsorption on a polycationic
+      support is expected to bias the achieved ratio toward GS by an unknown
+      amount (Gate 2, support chemistry).
+  gs_pi: {value: 5.40, class: prediction}
+  ppk2_pi: {value: 9.66, class: prediction}
+
+device:
+  bead_radius_um:
+    value: 10
+    class: prediction
+    note: >
+      Set by the geometric constraint L_bead <= L_coat/2, not by diffusion.
+      Below the size range of the chitosan microsphere literature.
+  bead_loading_kg_m3: {value: 2.0, class: assumption}
+  eta_bead:
+    value: 1.00
+    class: prediction
+    withdrawn: 0.70
+    note: >
+      The 0.70 came from a fitted Thiele constant implying a diffusivity 40 to
+      100 times below any physical value. D is now stated, not fitted.
+  d_atp_gel_m2_s: {value: 1.9e-10, class: assumption}
+  coating_thickness_um: {value: 24, class: assumption}
+  eta_coat: {value: 0.98, class: prediction}
+  cell_inradius_mm:
+    value: 1.50
+    tolerance: [1.0, 1.7]
+    class: prediction
+  cartridge_diameter_mm:
+    value: 400
+    class: assumption
+    note: the one device parameter no model determined; standard 16-inch PVC
+  stack_depth_mm: {value: 280, class: prediction}
+  cells_per_disc: {value: 9244, class: prediction}
+  coated_wall_area_m2: {value: 26.5, class: prediction}
+  face_velocity_m_s: {value: 0.4, class: prediction}
+  airflow_m3_h:
+    value: 181
+    class: prediction
+    note: quoted as 180 on the Model page
+  total_pressure_drop_Pa:
+    value: [64, 164]
+    class: literature
+    note: >
+      Scaffold 13.6 Pa plus pre-filter 20 to 50 Pa and humidifier 30 to 100 Pa.
+      Both the latter are literature ranges, not measurements. The fan duty is
+      181 m3/h against 64 to 164 Pa.
+  wall_thickness_mm:
+    value: 0.8
+    class: assumption
+    note: two 0.4 mm FDM perimeters
+  open_area_fraction:
+    value: 0.604
+    class: prediction
+  hydraulic_diameter_mm: {value: 2.95, class: prediction}
+  packing_fraction:
+    value: 0.92
+    class: assumption
+    note: fraction of the disc face occupied by hexagonal cells
+  tray_thickness_mm: {value: 20, class: assumption}
+  trays_per_unit: {value: 14, class: assumption}
+  petg_mass_kg: {value: 17, class: prediction}
+  reynolds_number:
+    value: 140
+    class: prediction
+    note: laminar; justifies the Sherwood correlation above
+  gas_film_coefficient_m_s:
+    value: 0.023
+    class: prediction
+    note: reduces wall flux by less than 2 %, so not limiting
+  single_pass_capture: {value: 0.12, class: prediction}
+  kinetic_ceiling_umol_min:
+    value: 720
+    class: prediction
+    note: >
+      What the enzyme could consume. Removal of 715 sits just below it, so
+      supply and kinetics are nearly balanced at this face velocity. A kinetic
+      ceiling is not a removal rate; the 1022 figure confused the two.
+  scaffold_pressure_drop_Pa:
+    value: 13.6
+    class: prediction
+    withdrawn: 0.91
+    note: >
+      Quoted as 14 Pa on the Model page, 13.6 in the Gate 4 working. The 0.91
+      figure is superseded by the face-velocity and area corrections.
+  removal_50ppm_umol_min:
+    value: 715
+    range: [430, 995]
+    class: prediction
+    withdrawn: 1022
+    note: >
+      The 1022 figure multiplied wall flux by total area and exceeded what the
+      airflow delivers. The model now integrates along each channel, so
+      removal cannot exceed delivery. Range is the rho = 0.3 to 0.7 band.
+
+reservoir:
+  glutamate_mM: {value: 150, class: assumption}
+  polyphosphate_mM: {value: 30, class: assumption}
+  atp_mM: {value: 3.5, class: assumption}
+  daily_nh3_per_unit_mol:
+    value: 0.31
+    class: prediction
+    note: 1500-bird farm, three units, 80 to 20 ppm
+  daily_reservoir_use_L_per_unit:
+    value: 10
+    class: prediction
+    note: at the 30 mM polyphosphate recipe
+  daily_nh3_removed_g_per_unit:
+    value: 17
+    class: prediction
+    note: if run continuously
+  phosphate_inhibition_threshold_mM:
+    value: 12.5
+    class: literature
+    note: >
+      BNU-China (2025), free SlPPK below 20 % activity above this. NOT coupled
+      into the rate equations; Gate 4 reports crossing times only.
+
+measurements_by_us: []
+# Deliberately empty. No wet-lab measurement was available this season, and
+# every rate on the Model page inherits that.

@@ -1,0 +1,23 @@
+cff-version: 1.2.0
+title: "Nishvasa model code"
+message: "If you use this code, please cite it."
+type: software
+authors:
+  - family-names: "Ningoo"
+    given-names: "Kunjal Kamal"
+    affiliation: "iGEM VIT Vellore 2026 (Team Nishvasa)"
+  - name: "iGEM VIT Vellore 2026 (Team Nishvasa)"
+license: MIT
+repository-code: "https://github.com/kkningoo/nishvasa-model"
+abstract: >
+  Computational models behind the Nishvasa ammonia scrubber: enzyme
+  selection from published kinetics, structural analysis for
+  immobilisation, coupled ATP regeneration, and device sizing from bead
+  to shed. Organised as four feasibility gates. Includes the parameter
+  file with provenance classes and the corrections carried from earlier
+  versions.
+keywords:
+  - enzyme immobilisation
+  - ammonia abatement
+  - reaction engineering
+  - iGEM
