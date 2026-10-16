@@ -48,7 +48,13 @@ gate2_structural/              can they be made into one component
     plot_pka_no_mg.py          stability curves, metals stripped
   figures/
     interface_figure.py        energy density and the stitch-count reversal
-  md/                          [to be added]
+  md/
+    01_pbc_fix_...sh           two-pass trjconv, then RMSD, RMSF, Rg, H-bonds
+    02_plot_rmsd_rg_rmsf.py    plots the .xvg output, RMSF split by chain
+    03_contact_lifetime...py   template, with the gotchas documented
+    03b_..._wt_inhib.py        the filled-in version that produced Run 2
+    04_interface_contact...py  native inter-chain contact retention
+    05_rmsf_vs_bfactor.py      RMSF against crystallographic B-factors
 
 gate3_coupled/                 does the coupled reaction sustain itself
   model2_atp_regeneration.py   2A coating liquid, PPK2 necessity
@@ -62,7 +68,11 @@ gate4_device/                  can it be delivered at a useful rate
   model7_batch_scrubbing.py    batch time and farm sizing
   model8_continuous_operation.py  continuous mode, rejected at 7-70 units
 
-gate5_sensitivity/             [to be added]
+gate5_sensitivity/             how much do the answers depend on the inputs
+  nishvasa_sensitivity_simulation.py
+                               tornado, Morris, Sobol, Monte Carlo; carries
+                               its own re-implementation of Models 3-7 and
+                               verifies it against the document first
 
 data/                          structures and parsed outputs [not committed]
 ```
@@ -95,7 +105,19 @@ The minimisation needs OpenMM. `requirements.txt` lists both groups.
 | `model5_scaffold_geometry.py` | r = 1.5 mm at 99.2 % of the VRE peak; the circumscribed-circle error was a 21 % overestimate |
 | `model6_cartridge_removal.py` | 9,244 cells, 26.5 m2, 713 umol/min at 50 ppm, 13.6 Pa |
 | `model7_batch_scrubbing.py` | 6.0 / 7.3 / 9.6 h for the three farm sizes |
-| `model8_continuous_operation.py` | 7-70 units continuous against 1-6 batch |
+| `model8_continuous_operation.py` | 7 / 27 / 70 units continuous against 1 / 3 / 6 batch |
+| `nishvasa_sensitivity_simulation.py verify` | reproduces the above independently: 712.7 umol/min, 6.04 / 7.34 / 9.59 h |
+
+## A fourth correction, in the MD scripts
+
+Every original trajectory had the same PBC defect: `trjconv -pbc nojump` on a
+multi-chain system unwraps each molecule independently without clustering the
+assembly, so the chains drift into different periodic images. Backbone RMSD
+blows up to tens of nanometres and RMSF spikes 5-12 nm at the chain boundary,
+while the structure is physically fine -- the radius of gyration stays flat,
+which is the tell. `gate2_structural/md/01` fixes it and explains both that
+defect and the separate reference-frame problem that compounds it. Read that
+README before using any RMSD or RMSF number from these runs.
 
 ## Three corrections carried in this copy
 
