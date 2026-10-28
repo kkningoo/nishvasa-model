@@ -1,0 +1,132 @@
+%% Model 4 — PEGDA Coating Thickness
+% Trade-off between enzyme utilisation (eta_coat) and reactive volume
+% fraction (eps_coat) in the hydrogel coating on scaffold walls.
+
+clear; clc; close all;
+
+% --- Parameters (same ATP basis as Model 3) ---
+A_GS = 0.0783333;             % mol s^-1 kg^-1
+M_LOAD = 2.0;                 % kg/m^3
+KM_PLUS_C_ATP = 10.5;         % mM = mol/m^3
+D_ATP_GEL = 1.85e-10;         % m^2/s
+R_CELL = 1.5e-3;              % m, hex cell inradius
+
+k = sqrt(A_GS * M_LOAD / (KM_PLUS_C_ATP * D_ATP_GEL));
+saturation_depth = 1.0 / k;
+
+fprintf('Rate constant k = %.2f /m = %.4f /mm\n', k, k * 1e-3);
+fprintf('Saturation depth 1/k = %.0f um\n', saturation_depth * 1e6);
+
+eta_coat_fn = @(L) arrayfun(@(l) ifelse(l*k > 1e-6, tanh(l*k)/(l*k), 1.0), L);
+eps_coat_fn = @(L, r) 1.0 - (1.0 - L ./ r).^2;
+J_metric_fn = @(L, r) eta_coat_fn(L) .* eps_coat_fn(L, r);
+
+% --- Sweep ---
+L_sweep = linspace(1e-6, 700e-6, 5000);
+eta_arr = eta_coat_fn(L_sweep);
+eps_arr = eps_coat_fn(L_sweep, R_CELL);
+J_arr = J_metric_fn(L_sweep, R_CELL);
+active_depth_arr = eta_arr .* L_sweep;
+
+% Selected point
+L_sel = 24e-6;
+eta_sel = eta_coat_fn(L_sel);
+eps_sel = eps_coat_fn(L_sel, R_CELL);
+J_sel = J_metric_fn(L_sel, R_CELL);
+
+% J peak
+[J_peak_val, i_peak] = max(J_arr);
+L_peak = L_sweep(i_peak);
+eta_peak = eta_arr(i_peak);
+eps_peak = eps_arr(i_peak);
+
+fprintf('\nAt L_coat = 24 um:\n');
+fprintf('  eta_coat  = %.4f\n', eta_sel);
+fprintf('  eps_coat  = %.4f (%.1f%%)\n', eps_sel, eps_sel * 100);
+fprintf('  J         = %.4f\n', J_sel);
+fprintf('  J / J_peak = %.1f%%\n', J_sel / J_peak_val * 100);
+
+fprintf('\nJ peak at L_coat = %.0f um:\n', L_peak * 1e6);
+fprintf('  eta_coat = %.2f, eps_coat = %.2f, J = %.3f\n', eta_peak, eps_peak, J_peak_val);
+
+% Check with open radius
+R_OPEN = R_CELL - L_sel;
+eps_sel_open = eps_coat_fn(L_sel, R_OPEN);
+J_sel_open = eta_sel * eps_sel_open;
+fprintf('\nUsing r_open = %.3f mm instead of r = %.1f mm:\n', R_OPEN * 1e3, R_CELL * 1e3);
+fprintf('  eps_coat = %.4f, J = %.4f\n', eps_sel_open, J_sel_open);
+fprintf('  J change = %.1f%%\n', abs(J_sel_open - J_sel) / J_sel * 100);
+
+fprintf('\nThe coating thickness is retained at 24 um on enzyme-utilisation grounds (eta_coat = %.3f, i.e. %.1f%% activity cost), NOT because J is maximised there.\n', ...
+    eta_sel, (1 - eta_sel) * 100);
+
+% ============================================================
+% Figure: two panels
+% ============================================================
+fig = figure('Units', 'inches', 'Position', [1, 1, 14, 5.5], 'Visible', 'off');
+tl = tiledlayout(fig, 1, 2, 'TileSpacing', 'compact', 'Padding', 'compact');
+L_um = L_sweep * 1e6;
+
+color_j = [0, 114, 178]/255;
+color_eps = [213, 94, 0]/255;
+color_depth = [0, 158, 115]/255;
+
+% --- Panel (a): J and eps_coat ---
+ax_a = nexttile(tl); hold(ax_a, 'on'); box(ax_a, 'on');
+yyaxis(ax_a, 'left');
+p1 = plot(ax_a, L_um, J_arr, '-', 'Color', color_j, 'LineWidth', 2, ...
+    'DisplayName', 'J = \eta_{coat} \times \epsilon_{coat}');
+plot(ax_a, L_peak * 1e6, J_peak_val, 'o', 'Color', color_j, 'MarkerFaceColor', color_j, 'MarkerSize', 7);
+text(ax_a, L_peak * 1e6 + 30, J_peak_val - 0.015, ...
+    sprintf('J peak at %.0f um\n(J = %.3f)', L_peak*1e6, J_peak_val), 'Color', color_j, 'FontSize', 9);
+plot(ax_a, 24, J_sel, 's', 'Color', color_j, 'MarkerFaceColor', color_j, 'MarkerSize', 7);
+text(ax_a, 60, J_sel + 0.015, sprintf('24 um\n(J = %.3f)', J_sel), 'Color', color_j, 'FontSize', 9);
+ylabel(ax_a, 'J', 'FontSize', 11);
+ylim(ax_a, [0, 0.16]);
+ax_a.YColor = color_j;
+
+yyaxis(ax_a, 'right');
+p2 = plot(ax_a, L_um, eps_arr * 100, '--', 'Color', color_eps, 'LineWidth', 2, ...
+    'DisplayName', '\epsilon_{coat}');
+ylabel(ax_a, '\epsilon_{coat} (%)', 'FontSize', 11);
+ylim(ax_a, [0, 100]);
+ax_a.YColor = color_eps;
+
+xlabel(ax_a, 'Coating thickness L_{coat} (\mum)', 'FontSize', 11);
+title(ax_a, '(a) J and \epsilon_{coat} vs coating thickness', 'FontSize', 12);
+xlim(ax_a, [0, 700]);
+legend(ax_a, [p1, p2], 'Location', 'east', 'FontSize', 9);
+
+% --- Panel (b): eta_coat and active depth ---
+ax_b = nexttile(tl); hold(ax_b, 'on'); box(ax_b, 'on');
+yyaxis(ax_b, 'left');
+p3 = plot(ax_b, L_um, eta_arr, '-', 'Color', color_j, 'LineWidth', 2, 'DisplayName', '\eta_{coat}');
+ylabel(ax_b, '\eta_{coat}', 'FontSize', 11);
+ylim(ax_b, [0, 1.05]);
+ax_b.YColor = color_j;
+
+yyaxis(ax_b, 'right');
+p4 = plot(ax_b, L_um, active_depth_arr * 1e6, '--', 'Color', color_depth, 'LineWidth', 2, ...
+    'DisplayName', 'Active depth \eta_{coat} L');
+yline(ax_b, saturation_depth * 1e6, ':', 'Color', color_depth, 'LineWidth', 1.2, 'HandleVisibility', 'off');
+text(ax_b, 600, saturation_depth * 1e6 + 4, sprintf('1/k = %.0f um', saturation_depth * 1e6), ...
+    'Color', color_depth, 'FontSize', 9, 'HorizontalAlignment', 'right');
+ylabel(ax_b, 'Active depth \eta L (\mum)', 'FontSize', 11);
+ylim(ax_b, [0, 130]);
+ax_b.YColor = color_depth;
+
+xlabel(ax_b, 'Coating thickness L_{coat} (\mum)', 'FontSize', 11);
+title(ax_b, '(b) \eta_{coat} and active depth', 'FontSize', 12);
+xlim(ax_b, [0, 700]);
+legend(ax_b, [p3, p4], 'Location', 'east', 'FontSize', 9);
+
+exportgraphics(fig, 'model4_pegda_coating.png', 'Resolution', 200);
+close(fig);
+
+function out = ifelse(cond, val_true, val_false)
+    if cond
+        out = val_true;
+    else
+        out = val_false;
+    end
+end

@@ -1,0 +1,150 @@
+%% Model 8 — Continuous Operation Check
+% Tests whether running cartridges continuously to hold 20 ppm is
+% practical, and compares against batch mode (Model 7).
+
+clear; clc; close all;
+
+% --- Physical constants ---
+R_GAS = 8.314462;
+T_K = 298.15;
+P_ATM = 101325.0;
+p.PPM_TO_MOLM3 = P_ATM / (R_GAS * T_K) * 1e-6;
+
+p.H_CC = 1443.0;
+p.D_NH3_AIR = 2.3e-5;
+p.SH = 3.0;
+
+% --- Scaffold geometry ---
+p.L_COAT = 24e-6;
+R_CELL = 1.5e-3;
+T_WALL = 0.8e-3;
+p.PACK_FRACTION = 0.92;
+p.Z_STACK = 14 * 0.020;
+
+r_open = R_CELL - p.L_COAT;
+A_open = 2 * sqrt(3) * r_open^2;
+p.A_cell = 2 * sqrt(3) * (R_CELL + T_WALL / 2)^2;
+p.D_h = 2 * r_open;
+p.eps_open = A_open / p.A_cell;
+
+% --- Kinetics ---
+A_GS = 0.0783333;
+M_LOAD = 2.0;
+ETA_BEAD = 1.00;
+ETA_COAT = 0.985;
+RHO_RETAINED = 0.5;
+p.KM_NH3_MOLM3 = 0.4;
+KM_GLU_MM = 30.0;
+KM_ATP_MM = 7.0;
+GLU_FIXED_MM = 150.0;
+ATP_FIXED_MM = 3.5;
+
+f_Glu = GLU_FIXED_MM / (KM_GLU_MM + GLU_FIXED_MM);
+f_ATP = ATP_FIXED_MM / (KM_ATP_MM + ATP_FIXED_MM);
+p.V_MAX_EFF = ETA_BEAD * ETA_COAT * RHO_RETAINED * A_GS * M_LOAD * f_Glu * f_ATP;
+
+% R at 20 ppm (the target)
+C_TARGET_PPM = 20.0;
+C_TARGET_MOLM3 = C_TARGET_PPM * p.PPM_TO_MOLM3;
+R_at_target = removal_rate_one_unit(C_TARGET_MOLM3, p);
+R_at_target_umol_min = R_at_target * 1e6 * 60;
+
+fprintf('R(20 ppm) = %.0f umol/min per unit\n', R_at_target_umol_min);
+
+% --- Farm scenarios ---
+farms = {
+    '500-bird farm (150 m^3)',   150.0,  60.0;
+    '1,500-bird farm (375 m^3)', 375.0,  80.0;
+    '3,000-bird farm (750 m^3)', 750.0, 100.0
+};
+
+fprintf('\n%30s  %16s  %15s  %18s\n', 'Farm', 'Emission (g/day)', 'Units at 1 ACH', 'Zero-crossing ACH');
+
+N_1ach_list = zeros(1, 3);
+ach_zero_list = zeros(1, 3);
+
+for i = 1:size(farms, 1)
+    label = farms{i, 1}; V_shed = farms{i, 2}; C0_ppm = farms{i, 3};
+    Q_1 = V_shed / 3600.0;
+    S = Q_1 * C0_ppm * p.PPM_TO_MOLM3;
+    emission_g_day = S * 17.031 * 86400;
+    
+    N_units_1ach = (S - Q_1 * C_TARGET_MOLM3) / R_at_target;
+    N_1ach_list(i) = ceil(N_units_1ach);
+    ach_zero_list(i) = C0_ppm / C_TARGET_PPM;
+    
+    fprintf('%30s  %16.0f  %15d  %18.0f\n', label, emission_g_day, N_1ach_list(i), ach_zero_list(i));
+end
+
+batch_units = [1, 3, 6];
+fprintf('\nContinuous operation at 1 ACH requires %d-%d units — versus %d-%d units in batch mode (Model 7).\n', ...
+    N_1ach_list(1), N_1ach_list(3), batch_units(1), batch_units(3));
+for i = 1:3
+    fprintf('  %s: %d vs %d units (%.0fx reduction with batch)\n', ...
+        farms{i, 1}, N_1ach_list(i), batch_units(i), N_1ach_list(i) / batch_units(i));
+end
+
+% ============================================================
+% Figure: units needed vs ventilation rate (ACH)
+% ============================================================
+fig = figure('Units', 'inches', 'Position', [1, 1, 9, 5.5], 'Visible', 'off');
+ax = axes(fig); hold(ax, 'on'); box(ax, 'on');
+colors = {[0, 114, 178]/255, [230, 159, 0]/255, [213, 94, 0]/255};
+
+for i = 1:3
+    label = farms{i, 1}; V_shed = farms{i, 2}; C0 = farms{i, 3};
+    ach_zero = ach_zero_list(i);
+    ach_sweep = linspace(1.0, ach_zero, 200);
+    
+    S = (V_shed / 3600.0) * C0 * p.PPM_TO_MOLM3;
+    Q_vent = V_shed .* ach_sweep / 3600.0;
+    excess = max(S - Q_vent * C_TARGET_MOLM3, 0);
+    n_units_sweep = excess / R_at_target;
+    
+    plot(ax, ach_sweep, n_units_sweep, '-', 'Color', colors{i}, 'LineWidth', 2, 'DisplayName', label);
+    plot(ax, 1.0, N_1ach_list(i), 'o', 'Color', colors{i}, 'MarkerFaceColor', colors{i}, 'MarkerSize', 6, 'HandleVisibility', 'off');
+    text(ax, 1.2, N_1ach_list(i) + 2, sprintf('%d units', N_1ach_list(i)), 'Color', colors{i}, 'FontSize', 9);
+    
+    plot(ax, ach_zero, 0, 'v', 'Color', colors{i}, 'MarkerFaceColor', colors{i}, 'MarkerSize', 6, 'HandleVisibility', 'off');
+    text(ax, ach_zero, 4, sprintf('%.0f ACH', ach_zero), 'Color', colors{i}, 'FontSize', 9, 'HorizontalAlignment', 'center');
+end
+
+xlabel(ax, 'Ventilation rate (ACH)', 'FontSize', 11);
+ylabel(ax, 'Units needed to hold 20 ppm', 'FontSize', 11);
+title(ax, {'Continuous operation: units needed vs ventilation', '(\Phi 400 mm, 0.4 m/s, \rho = 0.5)'}, 'FontSize', 12);
+legend(ax, 'Location', 'northeast', 'FontSize', 10);
+xlim(ax, [0.8, 6]); ylim(ax, [0, inf]);
+
+exportgraphics(fig, 'model8_continuous_operation.png', 'Resolution', 200);
+close(fig);
+
+fprintf('\nConclusion: Continuous operation at realistic ventilation needs 7-70 units — not affordable for the target farms. Batch scrubbing during peaks reaches 20 ppm with 1-6 units (a 7-12x reduction). Good ventilation is still the cheapest first step.\n');
+
+% --- Helper Functions ---
+function R = removal_rate_one_unit(C_gas_molm3, p)
+    u_face = 0.4;
+    D_m = 0.4;
+    Q = u_face * pi * D_m^2 / 4;
+    u_ch = u_face / (p.PACK_FRACTION * p.eps_open);
+    opts = odeset('RelTol', 1e-10, 'AbsTol', 1e-14, 'MaxStep', p.Z_STACK / 50);
+    [~, C_sol] = ode45(@(x, C) dC_dx(x, C, u_ch, p), [0, p.Z_STACK], C_gas_molm3, opts);
+    C_out = max(C_sol(end), 0.0);
+    R = Q * (C_gas_molm3 - C_out);
+end
+
+function dC = dC_dx(~, C, u_ch, p)
+    if C <= 0
+        dC = 0.0;
+        return;
+    end
+    jm = p.V_MAX_EFF * p.L_COAT;
+    k_g = p.SH * p.D_NH3_AIR / p.D_h;
+    a_c = k_g * p.H_CC;
+    b_c = -(k_g * p.H_CC * C - k_g * p.KM_NH3_MOLM3 - jm * p.H_CC);
+    c_c = -k_g * p.KM_NH3_MOLM3 * C;
+    disc = max(b_c^2 - 4 * a_c * c_c, 0);
+    C_s = (-b_c + sqrt(disc)) / (2 * a_c);
+    c_liq = p.H_CC * C_s;
+    f_nh3 = c_liq / (p.KM_NH3_MOLM3 + c_liq);
+    dC = -(4.0 / (p.D_h * u_ch)) * p.V_MAX_EFF * p.L_COAT * f_nh3;
+end

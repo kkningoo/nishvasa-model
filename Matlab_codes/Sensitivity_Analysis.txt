@@ -1,0 +1,786 @@
+function nishvasa_sensitivity_simulation(mode)
+%% NISHVASA cartridge model: sensitivity and uncertainty simulation (single file)
+% ==============================================================================
+% Contents
+%   1. Model engine (Models 3-7): kinetics, Thiele moduli, gas film, plug flow, batch time
+%   2. Verification against the modelling document and independent ODE solvers
+%   3. Part A: local elasticity/tornado, Morris screening, Sobol indices (+ convergence replicate)
+%   4. Part B: Monte Carlo (Latin hypercube) propagation, success probabilities, units for 90% confidence
+%
+% Usage in MATLAB Command Window:
+%   nishvasa_sensitivity_simulation('verify')
+%   nishvasa_sensitivity_simulation('partA')
+%   nishvasa_sensitivity_simulation('partB')
+%   nishvasa_sensitivity_simulation('all')    % default if called with no arguments
+
+    if nargin < 1 || isempty(mode)
+        mode = 'all';
+    end
+
+    C = get_constants();
+
+    switch lower(mode)
+        case 'verify'
+            verify_model(C);
+        case 'parta'
+            run_part_A(C, 'sens1_results.mat');
+        case 'partb'
+            run_part_B(C, 'mc_results.mat', 'S2_deployment_table.csv', 12);
+        case 'all'
+            verify_model(C);
+            run_part_A(C, 'sens1_results.mat');
+            run_part_B(C, 'mc_results.mat', 'S2_deployment_table.csv', 12);
+        otherwise
+            fprintf('Unknown mode "%s". Use ''verify'', ''partA'', ''partB'', or ''all''.\n', mode);
+    end
+end
+
+%% =====================================================================================
+%  1. MODEL ENGINE & CONSTANTS
+%  =====================================================================================
+function C = get_constants()
+    C.PPM = 4.09e-5;          % mol/m^3 per ppm
+    C.Z_STACK = 0.280;        % m, stack depth (14 trays x 20 mm)
+    C.PACK = 0.92;            % hexagon-in-circle packing fraction
+    C.D_AIR = 2.3e-5;         % m^2/s, NH3 diffusivity in air
+    C.L_BEAD = 10e-6;         % m, selected bead radius (Model 3)
+    C.D_ATP_FREE = 3.7e-10;   % m^2/s, free ATP diffusivity in water
+
+    % Baseline parameter set (Models 1-6)
+    C.BASE = struct( ...
+        'rho',   0.5, ...
+        'ATP',   3.5, ...
+        'Glu',   150.0, ...
+        'M',     2.0, ...
+        'a',     4.7, ...
+        'KmATP', 7.0, ...
+        'KmNH3', 0.4, ...
+        'KmGlu', 30.0, ...
+        'Ki',    115.0 / (1.0 + 150.0 / 30.0), ...
+        'Gln',   0.0, ...
+        'Lcoat', 24e-6, ...
+        'r',     1.5e-3, ...
+        'tw',    0.8e-3, ...
+        'Dgel',  0.5 * C.D_ATP_FREE, ...
+        'Hcc',   1443.0, ...
+        'u',     0.4, ...
+        'Sh',    3.0, ...
+        'C0',    80.0, ...
+        'D',     0.400 ...
+    );
+
+    % 8-point Gauss-Legendre nodes and weights on [-1, 1]
+    C.GL_X = [-0.96028985649753623, -0.79666647741362674, -0.52553240991632899, -0.18343464249564980, ...
+               0.18343464249564980,  0.52553240991632899,  0.79666647741362674,  0.96028985649753623];
+    C.GL_W = [ 0.10122853629037626,  0.22238103445337447,  0.31370664587788729,  0.36268378337836198, ...
+               0.36268378337836198,  0.31370664587788729,  0.22238103445337447,  0.10122853629037626];
+
+    % Parameter bounds table for Part A: {name, low, high, scale}
+    C.PAR = {
+        'rho',   0.3,                0.7,                'lin';
+        'ATP',   1.75,               7.0,                'lin';
+        'Glu',   100.0,              200.0,              'lin';
+        'M',     1.0,                4.0,                'lin';
+        'a',     4.7 * 0.8,          4.7 * 1.2,          'lin';
+        'KmATP', 5.0,                9.0,                'lin';
+        'KmNH3', 0.2,                0.8,                'lin';
+        'Ki',    C.BASE.Ki * 0.7,    C.BASE.Ki * 1.3,    'lin';
+        'Gln',   0.0,                21.0,               'lin';
+        'Lcoat', 20e-6,              50e-6,              'lin';
+        'r',     1.3e-3,             1.7e-3,             'lin';
+        'Dgel',  0.3 * C.D_ATP_FREE, 0.8 * C.D_ATP_FREE, 'log';
+        'Hcc',   1443.0 * 0.9,       1443.0 * 1.1,       'lin';
+        'u',     0.2,                0.6,                'lin';
+        'Sh',    2.5,                4.0,                'lin';
+        'C0',    60.0,               100.0,              'lin'
+    };
+    C.NAMES = C.PAR(:, 1)';
+end
+
+function out = eta_sphere(phi)
+    out = zeros(size(phi));
+    small = phi < 0.05;
+    ps = phi(small);
+    out(small) = 1.0 - (ps.^2) ./ 15.0 + 2.0 .* (ps.^4) ./ 315.0;
+    pl = phi(~small);
+    out(~small) = (3.0 ./ pl) .* (1.0 ./ tanh(pl) - 1.0 ./ pl);
+end
+
+function val = get_field_or_base(p, field, BASE, n_len)
+    if isfield(p, field)
+        val = p.(field)(:);
+        if isscalar(val) && n_len > 1
+            val = repmat(val, n_len, 1);
+        end
+    else
+        val = repmat(BASE.(field), n_len, 1);
+    end
+end
+
+function d = derived(p, C, eta_coat_fixed, eta_bead_fixed)
+    if nargin < 3, eta_coat_fixed = []; end
+    if nargin < 4, eta_bead_fixed = []; end
+
+    fnames = fieldnames(p);
+    n_len = 1;
+    for i = 1:length(fnames)
+        n_len = max(n_len, numel(p.(fnames{i})));
+    end
+
+    rho   = get_field_or_base(p, 'rho',   C.BASE, n_len);
+    ATP   = get_field_or_base(p, 'ATP',   C.BASE, n_len);
+    Glu   = get_field_or_base(p, 'Glu',   C.BASE, n_len);
+    M     = get_field_or_base(p, 'M',     C.BASE, n_len);
+    a     = get_field_or_base(p, 'a',     C.BASE, n_len);
+    KmATP = get_field_or_base(p, 'KmATP', C.BASE, n_len);
+    KmNH3 = get_field_or_base(p, 'KmNH3', C.BASE, n_len);
+    Ki    = get_field_or_base(p, 'Ki',    C.BASE, n_len);
+    Gln   = get_field_or_base(p, 'Gln',   C.BASE, n_len);
+    Lc    = get_field_or_base(p, 'Lcoat', C.BASE, n_len);
+    r     = get_field_or_base(p, 'r',     C.BASE, n_len);
+    Dg    = get_field_or_base(p, 'Dgel',  C.BASE, n_len);
+    Hcc   = get_field_or_base(p, 'Hcc',   C.BASE, n_len);
+    u     = get_field_or_base(p, 'u',     C.BASE, n_len);
+    Sh    = get_field_or_base(p, 'Sh',    C.BASE, n_len);
+    tw    = get_field_or_base(p, 'tw',    C.BASE, n_len);
+    KmGlu = get_field_or_base(p, 'KmGlu', C.BASE, n_len);
+    D     = get_field_or_base(p, 'D',     C.BASE, n_len);
+
+    a_si = a ./ 60.0;
+    aM = a_si .* M;
+    k2 = aM ./ ((KmATP + ATP) .* Dg);
+    phi_c = Lc .* sqrt(k2);
+    phi_b = C.L_BEAD .* sqrt(k2);
+
+    if isempty(eta_coat_fixed)
+        eta_c = tanh(phi_c) ./ phi_c;
+    else
+        eta_c = repmat(eta_coat_fixed, size(phi_c));
+    end
+
+    if isempty(eta_bead_fixed)
+        eta_b = eta_sphere(phi_b);
+    else
+        eta_b = repmat(eta_bead_fixed, size(phi_b));
+    end
+
+    fGlu = Glu ./ (KmGlu .* (1.0 + Gln ./ Ki) + Glu);
+    fATP = ATP ./ (KmATP + ATP);
+    Vmax = eta_b .* eta_c .* rho .* aM .* fGlu .* fATP;
+
+    ro = r - Lc;
+    rout = r + tw ./ 2.0;
+    Aopen = 2.0 .* sqrt(3.0) .* (ro.^2);
+    Acell = 2.0 .* sqrt(3.0) .* (rout.^2);
+    P = 4.0 .* sqrt(3.0) .* ro;
+    Dh = 2.0 .* ro;
+    eps = Aopen ./ Acell;
+    face = pi .* (D.^2) ./ 4.0;
+    Ncell = C.PACK .* face ./ Acell;
+    Q = u .* face;
+    uch = u ./ (C.PACK .* eps);
+    kg = Sh .* C.D_AIR ./ Dh;
+
+    d = struct('Vmax', Vmax, 'eta_c', eta_c, 'eta_b', eta_b, 'fGlu', fGlu, 'fATP', fATP, ...
+               'Aopen', Aopen, 'P', P, 'Dh', Dh, 'eps', eps, 'Ncell', Ncell, 'Q', Q, ...
+               'uch', uch, 'kg', kg, 'Lc', Lc, 'Hcc', Hcc, 'KmNH3', KmNH3, 'face', face);
+end
+
+function c = surface_conc(C_gas, d)
+    Vp = d.Vmax .* d.Lc;
+    H = d.Hcc; Km = d.KmNH3; kg = d.kg;
+    b = H .* C_gas - Km - Vp .* H ./ kg;
+    c = 0.5 .* (b + sqrt(b.^2 + 4.0 .* H .* C_gas .* Km));
+end
+
+function j = wall_flux(C_gas, d)
+    c = surface_conc(C_gas, d);
+    j = d.Vmax .* d.Lc .* c ./ (d.KmNH3 + c);
+end
+
+function C_out = outlet(Cin, d, C_const, nstep)
+    if nargin < 4, nstep = 24; end
+    h = C_const.Z_STACK / nstep;
+    kappa = d.P ./ (d.uch .* d.Aopen);
+    C_cur = Cin(:);
+    if isscalar(C_cur) && numel(kappa) > 1
+        C_cur = repmat(C_cur, size(kappa));
+    end
+    for step = 1:nstep
+        k1 = -kappa .* wall_flux(C_cur, d);
+        k2 = -kappa .* wall_flux(C_cur + 0.5 .* h .* k1, d);
+        k3 = -kappa .* wall_flux(C_cur + 0.5 .* h .* k2, d);
+        k4 = -kappa .* wall_flux(C_cur + h .* k3, d);
+        C_cur = C_cur + (h ./ 6.0) .* (k1 + 2.0.*k2 + 2.0.*k3 + k4);
+    end
+    C_out = C_cur;
+end
+
+function R = removal_rate(C_ppm, d, C_const, nstep)
+    if nargin < 4, nstep = 24; end
+    Cin = C_ppm(:) .* C_const.PPM;
+    if isscalar(Cin) && numel(d.Q) > 1
+        Cin = repmat(Cin, size(d.Q));
+    end
+    R = d.Q .* (Cin - outlet(Cin, d, C_const, nstep));
+end
+
+function I = inv_rate_integral(C0_ppm, d, C_const, Cf_ppm, nstep)
+    if nargin < 4, Cf_ppm = 20.0; end
+    if nargin < 5, nstep = 24; end
+    C0 = C0_ppm(:) .* C_const.PPM;
+    if isscalar(C0) && numel(d.Q) > 1
+        C0 = repmat(C0, size(d.Q));
+    end
+    Cf = Cf_ppm .* C_const.PPM;
+    half = 0.5 .* (C0 - Cf);
+    mid  = 0.5 .* (C0 + Cf);
+    tot = zeros(size(C0));
+    for k = 1:length(C_const.GL_X)
+        Cn = mid + half .* C_const.GL_X(k);
+        R  = d.Q .* (Cn - outlet(Cn, d, C_const, nstep));
+        tot = tot + C_const.GL_W(k) ./ R;
+    end
+    I = half .* tot;
+end
+
+function t_h = batch_time_h(C0_ppm, Vshed, n_units, d, C_const, Cf_ppm, nstep)
+    if nargin < 6, Cf_ppm = 20.0; end
+    if nargin < 7, nstep = 24; end
+    t_h = Vshed .* inv_rate_integral(C0_ppm, d, C_const, Cf_ppm, nstep) ./ n_units ./ 3600.0;
+end
+
+%% =====================================================================================
+%  2. VERIFICATION
+%  =====================================================================================
+function verify_model(C)
+    d = derived(C.BASE, C);
+    d98 = derived(C.BASE, C, 0.98, 1.0);
+    fprintf('Vmax_eff (computed eta) = %.5f, eta_coat = %.4f, eta_bead = %.5f\n', ...
+        d.Vmax, d.eta_c, d.eta_b);
+    fprintf('Vmax_eff (document eta 0.98) = %.5f   [document: 0.021]\n', d98.Vmax);
+
+    for C_ppm = [20, 50, 100]
+        fprintf('R(%3d ppm) = %.1f umol/min   [document: 585 / 715 / 765]\n', ...
+            C_ppm, removal_rate(C_ppm, d, C) * 6e7);
+    end
+
+    farms = {
+        '500 birds, 1 unit',   150, 60,  1;
+        '1500 birds, 3 units', 375, 80,  3;
+        '3000 birds, 6 units', 750, 100, 6
+    };
+    for i = 1:size(farms, 1)
+        lab = farms{i, 1}; V = farms{i, 2}; C0 = farms{i, 3}; n = farms{i, 4};
+        fprintf('batch time %-22s = %.2f h   [document: 6.0 / 7.3 / 9.6]\n', ...
+            lab, batch_time_h(C0, V, n, d, C));
+    end
+
+    % Independent ode15s (LSODA equivalent) cross-check of the channel integration
+    kappa = d.P / (d.uch * d.Aopen);
+    opts = odeset('RelTol', 1e-11, 'AbsTol', 1e-16);
+    for C_ppm = [20, 50, 100]
+        [~, c_sol] = ode15s(@(x, c) -kappa * wall_flux(c, d), [0, C.Z_STACK], C_ppm * C.PPM, opts);
+        R_ref = d.Q * (C_ppm * C.PPM - c_sol(end));
+        rel_err = abs(removal_rate(C_ppm, d, C) / R_ref - 1.0);
+        fprintf('RK4 vs ode15s at %3d ppm: relative error %.2e\n', C_ppm, rel_err);
+    end
+end
+
+%% =====================================================================================
+%  3. PART A: LOCAL, MORRIS, SOBOL
+%  =====================================================================================
+function p = to_phys(U, names, C)
+    p = struct();
+    for j = 1:length(names)
+        n = names{j};
+        idx = find(strcmp(C.NAMES, n), 1);
+        lo = C.PAR{idx, 2};
+        hi = C.PAR{idx, 3};
+        sc = C.PAR{idx, 4};
+        if strcmp(sc, 'lin')
+            p.(n) = lo + U(:, j) .* (hi - lo);
+        else
+            p.(n) = exp(log(lo) + U(:, j) .* (log(hi) - log(lo)));
+        end
+    end
+end
+
+function [R50, T] = model_AB(p, C, chunk)
+    if nargin < 3, chunk = 4000; end
+    V_SHED_A = 375.0;
+    N_UNITS_A = 3;
+    CF_PPM = 20.0;
+
+    fnames = fieldnames(p);
+    n = numel(p.(fnames{1}));
+    R50 = zeros(n, 1);
+    T   = zeros(n, 1);
+
+    for s = 1:chunk:n
+        idx = s:min(s + chunk - 1, n);
+        q = struct();
+        for k = 1:length(fnames)
+            fn = fnames{k};
+            q.(fn) = p.(fn)(idx);
+        end
+        d = derived(q, C);
+        R50(idx) = removal_rate(50.0, d, C) .* 6e7;
+        if isfield(q, 'C0')
+            C0_vec = q.C0;
+        else
+            C0_vec = repmat(C.BASE.C0, length(idx), 1);
+        end
+        T(idx) = batch_time_h(C0_vec, V_SHED_A, N_UNITS_A, d, C, CF_PPM);
+    end
+end
+
+function res = run_part_A(C, out_file)
+    t0 = tic;
+    res = struct();
+
+    % ---------- Local tornado (+/-20%) and elasticities (central difference in logs, +/-1%)
+    base = struct();
+    for k = 1:length(C.NAMES)
+        fn = C.NAMES{k};
+        base.(fn) = C.BASE.(fn);
+    end
+    [R0, T0] = model_AB(base, C);
+    res.base = struct('R', R0(1), 'T', T0(1));
+
+    tor = struct();
+    tags = {'lo', 'hi', 'elo', 'ehi'};
+    mults = [0.8, 1.2, 0.99, 1.01];
+    dl = log(1.01) - log(0.99);
+
+    for k = 1:length(C.NAMES)
+        n = C.NAMES{k};
+        if ismember(n, {'Gln', 'Ki'})
+            continue;
+        end
+        row = struct();
+        for m = 1:4
+            q = base;
+            q.(n) = q.(n) * mults(m);
+            [R_val, T_val] = model_AB(q, C);
+            row.(tags{m}) = [R_val(1), T_val(1)];
+        end
+        row.elast = [(log(row.ehi(1)) - log(row.elo(1))) / dl, ...
+                     (log(row.ehi(2)) - log(row.elo(2))) / dl];
+        tor.(n) = row;
+    end
+    res.tornado = tor;
+    fprintf('tornado done (%.1f s); baseline R50 = %.1f umol/min, T = %.2f h\n', ...
+        toc(t0), R0(1), T0(1));
+
+    % ---------- Morris screening: r = 50 trajectories, p = 4 levels, step 2/3 on unit cube
+    names_R = C.NAMES(~strcmp(C.NAMES, 'C0'));
+    res.morris_R_names = names_R;
+    res.morris_R = run_morris_impl(names_R, 'R', 50, 4, 11, C);
+    res.morris_T_names = C.NAMES;
+    res.morris_T = run_morris_impl(C.NAMES, 'T', 50, 4, 11, C);
+    fprintf('morris done (%.1f s)\n', toc(t0));
+
+    % ---------- Sobol: Saltelli sampling (N*(k+2) runs), Saltelli-2010 S1 & Jansen ST
+    res.sobol_names_R = names_R;
+    res.sobol_N2048 = sobol_pair_impl(names_R, C.NAMES, 2048, 7, C);
+    fprintf('sobol N=2048 done (%.1f s)\n', toc(t0));
+    res.sobol_N1024 = sobol_pair_impl(names_R, C.NAMES, 1024, 101, C);
+    fprintf('sobol N=1024 done (%.1f s)\n', toc(t0));
+
+    % ---------- Scatter data: independent Latin hypercube (4000 runs)
+    U_scat = lhs_sample(4000, length(C.NAMES), 3);
+    X_phys = to_phys(U_scat, C.NAMES, C);
+    [R_scat, T_scat] = model_AB(X_phys, C);
+    res.scatter = struct('X', X_phys, 'R', R_scat, 'T', T_scat);
+    res.time = toc(t0);
+
+    save(out_file, '-struct', 'res');
+
+    % Short console summary
+    s = res.sobol_N2048.lnT;
+    fprintf('\nSobol (ln t), N = 2048:  sum S1 = %.3f, sum ST = %.3f\n', sum(s.S1), sum(s.ST));
+    [~, sort_idx] = sort(s.ST, 'descend');
+    for idx = sort_idx(1:8)'
+        fprintf('  %-6s S1 = %.3f  ST = %.3f +/- %.3f\n', ...
+            C.NAMES{idx}, s.S1(idx), s.ST(idx), s.ST_conf(idx));
+    end
+    fprintf('saved %s\n', out_file);
+end
+
+function m_out = run_morris_impl(names, output_type, r_traj, num_levels, seed, C)
+    rng(seed, 'twister');
+    k = length(names);
+    delta = num_levels / (2.0 * (num_levels - 1.0)); % 2/3 for p=4
+    grid_pts = linspace(0, 1 - delta, num_levels / 2);
+
+    X = zeros(r_traj * (k + 1), k);
+    dirs = zeros(r_traj, k);
+    perm_orders = zeros(r_traj, k);
+
+    for r = 1:r_traj
+        x0 = grid_pts(randi(length(grid_pts), 1, k));
+        d_vec = 2 * randi([0, 1], 1, k) - 1;
+        p_ord = randperm(k);
+        B = zeros(k + 1, k);
+        B(1, :) = x0;
+        for j = 1:k
+            B(j + 1, :) = B(j, :);
+            idx_var = p_ord(j);
+            step = delta * d_vec(idx_var);
+            if B(j, idx_var) + step > 1.0 || B(j, idx_var) + step < 0.0
+                step = -step;
+            end
+            B(j + 1, idx_var) = B(j, idx_var) + step;
+            dirs(r, idx_var) = sign(step);
+        end
+        X((r-1)*(k+1)+1 : r*(k+1), :) = B;
+        perm_orders(r, :) = p_ord;
+    end
+
+    [R_val, T_val] = model_AB(to_phys(X, names, C), C);
+    if strcmp(output_type, 'R')
+        Y = R_val;
+    else
+        Y = log(T_val);
+    end
+
+    EE = zeros(r_traj, k);
+    for r = 1:r_traj
+        y_seg = Y((r-1)*(k+1)+1 : r*(k+1));
+        p_ord = perm_orders(r, :);
+        for j = 1:k
+            idx_var = p_ord(j);
+            EE(r, idx_var) = (y_seg(j + 1) - y_seg(j)) / (delta * dirs(r, idx_var));
+        end
+    end
+
+    mu = mean(EE, 1)';
+    mu_star = mean(abs(EE), 1)';
+    sigma = std(EE, 0, 1)';
+
+    % 95% bootstrap confidence interval on mu_star
+    n_boot = 1000;
+    boot_ms = zeros(n_boot, k);
+    for b = 1:n_boot
+        b_idx = randi(r_traj, r_traj, 1);
+        boot_ms(b, :) = mean(abs(EE(b_idx, :)), 1);
+    end
+    mu_star_conf = (1.96 .* std(boot_ms, 0, 1))';
+
+    m_out = struct('mu', mu, 'mu_star', mu_star, 'sigma', sigma, 'mu_star_conf', mu_star_conf);
+end
+
+function out_pair = sobol_pair_impl(names_R, names_T, N, seed, C)
+    oR = run_sobol_impl(names_R, N, seed, C);
+    oT = run_sobol_impl(names_T, N, seed, C);
+    out_pair = struct('R', oR.R, 'n_R', oR.n_eval, 'lnT', oT.lnT, 'T', oT.T, 'n_T', oT.n_eval);
+end
+
+function out_s = run_sobol_impl(names, N, seed, C)
+    k = length(names);
+    AB = qmc_sobol_matrix(N, 2 * k, seed);
+    A = AB(:, 1:k);
+    B = AB(:, k+1:2*k);
+
+    % Saltelli first-order evaluation matrix: N*(k+2) rows
+    X = zeros(N * (k + 2), k);
+    X(1:N, :) = A;
+    X(N+1:2*N, :) = B;
+    for j = 1:k
+        Ab = A;
+        Ab(:, j) = B(:, j);
+        X((j+1)*N + 1 : (j+2)*N, :) = Ab;
+    end
+
+    [R_val, T_val] = model_AB(to_phys(X, names, C), C);
+
+    out_s = struct();
+    out_s.R   = analyze_sobol_vec(R_val, N, k, seed);
+    out_s.lnT = analyze_sobol_vec(log(T_val), N, k, seed);
+    out_s.T   = analyze_sobol_vec(T_val, N, k, seed);
+    out_s.n_eval = size(X, 1);
+end
+
+function res_a = analyze_sobol_vec(Y, N, k, seed)
+    rng(seed, 'twister');
+    fA = Y(1:N);
+    fB = Y(N+1:2*N);
+    fAb = zeros(N, k);
+    for j = 1:k
+        fAb(:, j) = Y((j+1)*N + 1 : (j+2)*N);
+    end
+
+    vy = var([fA; fB], 1);
+    S1 = mean(fB .* (fAb - fA), 1)' ./ vy;
+    ST = (0.5 .* mean((fA - fAb).^2, 1))' ./ vy;
+
+    % 1000 bootstrap resamples for 95% CI
+    n_boot = 1000;
+    b_S1 = zeros(n_boot, k);
+    b_ST = zeros(n_boot, k);
+    for b = 1:n_boot
+        idx = randi(N, N, 1);
+        fA_b = fA(idx);
+        fB_b = fB(idx);
+        fAb_b = fAb(idx, :);
+        vy_b = var([fA_b; fB_b], 1);
+        b_S1(b, :) = mean(fB_b .* (fAb_b - fA_b), 1) ./ vy_b;
+        b_ST(b, :) = 0.5 .* mean((fA_b - fAb_b).^2, 1) ./ vy_b;
+    end
+
+    res_a = struct( ...
+        'S1',      S1, ...
+        'S1_conf', (1.96 .* std(b_S1, 0, 1))', ...
+        'ST',      ST, ...
+        'ST_conf', (1.96 .* std(b_ST, 0, 1))', ...
+        'Ymean',   mean(Y), ...
+        'Yvar',    var(Y, 1) ...
+    );
+end
+
+%% =====================================================================================
+%  4. PART B: MONTE CARLO UNCERTAINTY PROPAGATION
+%  =====================================================================================
+function [p, uC0] = mc_draw(seed, n, C)
+    MC_COLS = {'rho', 'ATP', 'a', 'KmATP', 'Ki', 'KmNH3', 'Dgel', 'Lcoat', 'Hcc', 'Sh', 'C0'};
+    U = lhs_sample(n, length(MC_COLS), seed);
+
+    norm_ppf = @(q) -sqrt(2.0) .* erfcinv(2.0 .* q);
+
+    % Triangular(a=0.3, c_mode=0.5, b=0.7) inverse CDF
+    u_rho = U(:, 1);
+    rho_val = zeros(n, 1);
+    lo_mask = u_rho < 0.5;
+    rho_val(lo_mask)  = 0.3 + sqrt(u_rho(lo_mask) .* 0.4 .* 0.2);
+    rho_val(~lo_mask) = 0.7 - sqrt((1.0 - u_rho(~lo_mask)) .* 0.4 .* 0.2);
+
+    % Truncated normal N(24, 2.5) on [20, 30] -> z in [-1.6, 2.4]
+    norm_cdf = @(z) 0.5 .* erfc(-z ./ sqrt(2.0));
+    Phi_a = norm_cdf(-1.6);
+    Phi_b = norm_cdf(2.4);
+    u_lc = Phi_a + U(:, 8) .* (Phi_b - Phi_a);
+    Lcoat_val = (24.0 + 2.5 .* norm_ppf(u_lc)) .* 1e-6;
+
+    p = struct( ...
+        'rho',   rho_val, ...
+        'ATP',   2.8 + (4.2 - 2.8) .* U(:, 2), ...
+        'a',     4.7 .* exp(0.15 .* norm_ppf(U(:, 3))), ...
+        'KmATP', 7.0 .* exp(0.15 .* norm_ppf(U(:, 4))), ...
+        'Ki',    C.BASE.Ki .* exp(0.25 .* norm_ppf(U(:, 5))), ...
+        'KmNH3', 0.4 .* exp(0.30 .* norm_ppf(U(:, 6))), ...
+        'Dgel',  exp(log(0.3 * C.D_ATP_FREE) + U(:, 7) .* (log(0.8 * C.D_ATP_FREE) - log(0.3 * C.D_ATP_FREE))), ...
+        'Lcoat', Lcoat_val, ...
+        'Hcc',   1443.0 .* (0.9 + 0.2 .* U(:, 9)), ...
+        'Sh',    2.5 + 1.5 .* U(:, 10) ...
+    );
+    uC0 = U(:, 11);
+end
+
+function out = mc_run(seed, N_MC, C)
+    [p, uC0] = mc_draw(seed, N_MC, C);
+    out = struct('params', p, 'uC0', uC0);
+
+    FARMS = {
+        'f500',  500,  150.0, 60.0,  1;
+        'f1500', 1500, 375.0, 80.0,  3;
+        'f3000', 3000, 750.0, 100.0, 6
+    };
+    SCEN = {
+        'fresh', 150.0, 0.0;
+        'week',  129.0, 21.0
+    };
+    C0_HALF_RANGE = 15.0;
+
+    for s = 1:size(SCEN, 1)
+        sname = SCEN{s, 1};
+        q = p;
+        q.Glu = repmat(SCEN{s, 2}, N_MC, 1);
+        q.Gln = repmat(SCEN{s, 3}, N_MC, 1);
+        d = derived(q, C);
+
+        for f = 1:size(FARMS, 1)
+            fkey = FARMS{f, 1}; V = FARMS{f, 3}; C0_nom = FARMS{f, 4};
+            C0_vec = C0_nom - C0_HALF_RANGE + 2.0 .* C0_HALF_RANGE .* uC0;
+            T1 = batch_time_h(C0_vec, V, 1, d, C, 20.0);
+            T1n = batch_time_h(repmat(C0_nom, N_MC, 1), V, 1, d, C, 20.0);
+            out.(sprintf('%s_%s', sname, fkey)) = struct('T1', T1, 'C0', C0_vec, 'T1_nomC0', T1n);
+        end
+        out.(sprintf('%s_R50', sname)) = removal_rate(50.0, d, C) .* 6e7;
+
+        % Nominal (point-estimate) reference
+        q_nom = C.BASE;
+        q_nom.Glu = SCEN{s, 2};
+        q_nom.Gln = SCEN{s, 3};
+        d_nom = derived(q_nom, C);
+        for f = 1:size(FARMS, 1)
+            fkey = FARMS{f, 1}; V = FARMS{f, 3}; C0_nom = FARMS{f, 4};
+            out.nominal_T1.(sprintf('%s_%s', sname, fkey)) = batch_time_h(C0_nom, V, 1, d_nom, C, 20.0);
+        end
+    end
+end
+
+function [lo, hi] = wilson_ci(k, n, z)
+    if nargin < 3, z = 1.96; end
+    ph = k / n;
+    den = 1.0 + (z^2) / n;
+    c = (ph + (z^2) / (2.0 * n)) / den;
+    h = z * sqrt(ph * (1.0 - ph) / n + (z^2) / (4.0 * n^2)) / den;
+    lo = c - h;
+    hi = c + h;
+end
+
+function res = run_part_B(C, out_file, csv_out, nmax)
+    t0 = tic;
+    N_MC = 10000;
+    TLIM = 10.0;
+    res = mc_run(2026, N_MC, C);
+
+    FARMS = {
+        'f500',  500,  150.0, 60.0,  1;
+        'f1500', 1500, 375.0, 80.0,  3;
+        'f3000', 3000, 750.0, 100.0, 6
+    };
+    SCEN = {'fresh', 'week'};
+
+    summ = struct();
+    csv_rows = {};
+
+    for s = 1:length(SCEN)
+        sname = SCEN{s};
+        for f = 1:size(FARMS, 1)
+            fkey = FARMS{f, 1};
+            farm_birds = FARMS{f, 2};
+            n_rec = FARMS{f, 5};
+            tag = sprintf('%s_%s', sname, fkey);
+
+            T1 = res.(tag).T1;
+            T1_nomC0 = res.(tag).T1_nomC0;
+            nom_T1 = res.nominal_T1.(tag);
+
+            rows = repmat(struct('n', 0, 'P', 0, 'P_lo', 0, 'P_hi', 0, ...
+                'P_nomC0', 0, 'med', 0, 'p5', 0, 'p95', 0, 'nominal', 0), nmax, 1);
+
+            n90 = NaN;
+            for n = 1:nmax
+                t_vec = T1 ./ n;
+                k_succ = sum(t_vec <= TLIM);
+                [lo, hi] = wilson_ci(k_succ, N_MC);
+                P_val = k_succ / N_MC;
+                if isnan(n90) && P_val >= 0.90
+                    n90 = n;
+                end
+                q_vals = prctile_base(t_vec, [5, 50, 95]);
+                rows(n) = struct( ...
+                    'n',       n, ...
+                    'P',       P_val, ...
+                    'P_lo',    lo, ...
+                    'P_hi',    hi, ...
+                    'P_nomC0', mean((T1_nomC0 ./ n) <= TLIM), ...
+                    'med',     q_vals(2), ...
+                    'p5',      q_vals(1), ...
+                    'p95',     q_vals(3), ...
+                    'nominal', nom_T1 / n ...
+                );
+            end
+
+            n_i = ceil(T1 ./ TLIM);
+            n90_q = ceil(prctile_base(T1 ./ TLIM, 90));
+            summ.(tag) = struct('rows', rows, 'n90', n90, 'n_i_q90', n90_q, 'n_i', n_i);
+
+            r_rec = rows(n_rec);
+            fprintf('%-5s %4d birds: P(design %d units) = %.3f | median %.2f h (%.2f to %.2f) | n90 = %d (quantile form %d)\n', ...
+                sname, farm_birds, n_rec, r_rec.P, r_rec.med, r_rec.p5, r_rec.p95, n90, n90_q);
+
+            if ~isnan(n90)
+                r9 = rows(n90);
+                p_n90_str = sprintf('%.1f', 100 * r9.P);
+                lo_str = sprintf('%.1f', 100 * r9.P_lo);
+                hi_str = sprintf('%.1f', 100 * r9.P_hi);
+                n90_str = sprintf('%d', n90);
+            else
+                p_n90_str = ''; lo_str = ''; hi_str = ''; n90_str = '';
+            end
+
+            csv_rows(end+1, :) = { ...
+                farm_birds, sname, n_rec, ...
+                sprintf('%.1f', 100 * r_rec.P), ...
+                sprintf('%.1f', 100 * r_rec.P_nomC0), ...
+                sprintf('%.2f', r_rec.med), ...
+                sprintf('%.2f', r_rec.p5), ...
+                sprintf('%.2f', r_rec.p95), ...
+                sprintf('%.2f', r_rec.nominal), ...
+                n90_str, p_n90_str, lo_str, hi_str ...
+            }; %#ok<AGROW>
+        end
+    end
+
+    res.summary = summ;
+    save(out_file, '-struct', 'res');
+
+    % Write CSV
+    fid = fopen(csv_out, 'w');
+    fprintf(fid, 'farm_birds,reservoir,units_design,P_success_design_%%,P_success_design_fixedC0_%%,median_h,p5_h,p95_h,nominal_h,units_for_90pct,P_at_n90_%%,n90_CI95_lo_%%,n90_CI95_hi_%%\n');
+    for r_idx = 1:size(csv_rows, 1)
+        rw = csv_rows(r_idx, :);
+        fprintf(fid, '%d,%s,%d,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n', ...
+            rw{1}, rw{2}, rw{3}, rw{4}, rw{5}, rw{6}, rw{7}, rw{8}, rw{9}, rw{10}, rw{11}, rw{12}, rw{13});
+    end
+    fclose(fid);
+
+    fprintf('saved %s and %s (%.1f s)\n', out_file, csv_out, toc(t0));
+end
+
+%% =====================================================================================
+%  5. BASE MATLAB STATISTICAL & QMC HELPERS (Zero Toolbox Dependencies)
+%  =====================================================================================
+function U = lhs_sample(n, d, seed)
+    rng(seed, 'twister');
+    U = zeros(n, d);
+    for j = 1:d
+        perm = randperm(n)';
+        U(:, j) = (perm - 1 + rand(n, 1)) ./ n;
+    end
+end
+
+function X = qmc_sobol_matrix(N, D, seed)
+    % Uses sobolset if Statistics Toolbox is installed; falls back to scrambled
+    % radical-inverse Halton/Van der Corput sequence if running in base MATLAB.
+    rng(seed, 'twister');
+    if exist('sobolset', 'file') == 2
+        p = sobolset(D, 'Skip', 1024);
+        p = scramble(p, 'MatousekAffineOwen');
+        X = net(p, N);
+        % Apply seed-dependent random Cranley-Patterson shift for independent replicates
+        X = mod(X + rand(1, D), 1.0);
+    else
+        primes_list = [2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53, ...
+                       59, 61, 67, 71, 73, 79, 83, 89, 97, 101, 103, 107, 109, 113, 127, 131];
+        X = zeros(N, D);
+        indices = (1:N)';
+        for j = 1:D
+            b = primes_list(j);
+            radix = zeros(N, 1);
+            f = 1.0 / b;
+            idx_tmp = indices;
+            while any(idx_tmp > 0)
+                rem_val = mod(idx_tmp, b);
+                radix = radix + rem_val .* f;
+                idx_tmp = floor(idx_tmp ./ b);
+                f = f / b;
+            end
+            X(:, j) = mod(radix + rand(1, 1), 1.0);
+        end
+    end
+end
+
+function q = prctile_base(x, p)
+    % Linear interpolation quantile matching numpy.quantile(..., method='linear')
+    x_s = sort(x(:));
+    n = numel(x_s);
+    pos = 1 + (n - 1) .* (p(:) ./ 100.0);
+    lo = floor(pos);
+    hi = ceil(pos);
+    frac = pos - lo;
+    q = x_s(lo) + frac .* (x_s(hi) - x_s(lo));
+end
