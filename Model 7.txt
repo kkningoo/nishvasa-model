@@ -1,0 +1,307 @@
+%% Model 7 — Batch Scrubbing Time and Farm Sizing
+% Computes hours and unit counts to bring a poultry shed from C0 to 20 ppm
+% using D 400 mm cartridges at 0.4 m/s, by solving V_shed * dC/dt = -n * R(C).
+
+clear; clc; close all;
+
+% --- Physical constants ---
+R_GAS = 8.314462;
+T_K = 298.15;
+P_ATM = 101325.0;
+p.PPM_TO_MOLM3 = P_ATM / (R_GAS * T_K) * 1e-6;
+
+p.H_CC = 1443.0;
+p.D_NH3_AIR = 2.3e-5;
+p.SH = 3.0;
+p.MU_AIR = 1.84e-5;
+
+% --- Scaffold geometry ---
+p.L_COAT = 24e-6;
+R_CELL = 1.5e-3;
+T_WALL = 0.8e-3;
+p.PACK_FRACTION = 0.92;
+p.Z_STACK = 14 * 0.020;
+
+r_open = R_CELL - p.L_COAT;
+A_open = 2 * sqrt(3) * r_open^2;
+p.A_cell = 2 * sqrt(3) * (R_CELL + T_WALL / 2)^2;
+p.D_h = 2 * r_open;
+p.eps_open = A_open / p.A_cell;
+
+% --- Kinetic parameters ---
+p.A_GS = 0.0783333;
+p.M_LOAD = 2.0;
+p.ETA_BEAD = 1.00;
+p.ETA_COAT = 0.985;
+p.KM_NH3_MOLM3 = 0.4;
+p.KM_GLU_MM = 30.0;
+p.KM_ATP_MM = 7.0;
+p.GLU_FIXED_MM = 150.0;
+p.ATP_FIXED_MM = 3.5;
+
+p.f_Glu = p.GLU_FIXED_MM / (p.KM_GLU_MM + p.GLU_FIXED_MM);
+p.f_ATP = p.ATP_FIXED_MM / (p.KM_ATP_MM + p.ATP_FIXED_MM);
+
+fprintf('Building R(C) interpolation tables...\n');
+R_interp_nom = build_R_interp(400, 0.4, 0.5, p);
+R_interp_lo = build_R_interp(400, 0.4, 0.3, p);
+R_interp_hi = build_R_interp(400, 0.4, 0.7, p);
+
+% ============================================================
+% Farm scenarios
+% ============================================================
+C_TARGET = 20.0;
+farms = {
+    '500 birds',   150, 60,  1;
+    '1,500 birds', 375, 80,  3;
+    '3,000 birds', 750, 100, 6
+};
+
+fprintf('\n=== Batch scrubbing times (D 400 mm, 0.4 m/s, rho = 0.5) ===\n');
+fprintf('%20s  %6s  %4s  %5s  %8s  %6s  %6s\n', 'Farm', 'Shed', 'C0', 'Units', 'Time (h)', 'rho=0.7', 'rho=0.3');
+
+for i = 1:size(farms, 1)
+    label = farms{i, 1}; V = farms{i, 2}; C0 = farms{i, 3}; n = farms{i, 4};
+    t_nom = batch_time_h(V, C0, C_TARGET, n, R_interp_nom, p);
+    t_hi  = batch_time_h(V, C0, C_TARGET, n, R_interp_hi, p);
+    t_lo  = batch_time_h(V, C0, C_TARGET, n, R_interp_lo, p);
+    
+    C_bar = (C0 + C_TARGET) / 2 * p.PPM_TO_MOLM3;
+    R_bar = n * R_interp_nom(C_bar);
+    t_approx = V * (C0 - C_TARGET) * p.PPM_TO_MOLM3 / R_bar / 3600;
+    
+    fprintf('%20s  %6d  %4d  %5d  %8.1f  %6.1f  %6.1f  (approx %.1f h)\n', ...
+        label, V, C0, n, t_nom, t_hi, t_lo, t_approx);
+end
+
+% ============================================================
+% Figure 1: concentration vs time for recommended deployments
+% ============================================================
+fig1 = figure('Units', 'inches', 'Position', [1, 1, 9, 5.5], 'Visible', 'off');
+ax1 = axes(fig1); hold(ax1, 'on'); box(ax1, 'on');
+colors_farm = {[0, 114, 178]/255, [230, 159, 0]/255, [213, 94, 0]/255};
+t_pts = linspace(0, 15 * 3600, 500);
+opts = odeset('RelTol', 1e-8, 'AbsTol', 1e-12);
+
+for i = 1:size(farms, 1)
+    label = farms{i, 1}; V = farms{i, 2}; C0 = farms{i, 3}; n = farms{i, 4};
+    
+    [~, c_nom] = ode15s(@(t, C) ode_trace(C, C_TARGET*p.PPM_TO_MOLM3, n, V, R_interp_nom), t_pts, C0*p.PPM_TO_MOLM3, opts);
+    [~, c_hi]  = ode15s(@(t, C) ode_trace(C, C_TARGET*p.PPM_TO_MOLM3, n, V, R_interp_hi),  t_pts, C0*p.PPM_TO_MOLM3, opts);
+    [~, c_lo]  = ode15s(@(t, C) ode_trace(C, C_TARGET*p.PPM_TO_MOLM3, n, V, R_interp_lo),  t_pts, C0*p.PPM_TO_MOLM3, opts);
+    
+    t_h = t_pts / 3600;
+    fill(ax1, [t_h, fliplr(t_h)], [c_hi'/p.PPM_TO_MOLM3, fliplr(c_lo'/p.PPM_TO_MOLM3)], ...
+        colors_farm{i}, 'FaceAlpha', 0.12, 'EdgeColor', 'none', 'HandleVisibility', 'off');
+    
+    unit_str = 'units'; if n == 1, unit_str = 'unit'; end
+    plot(ax1, t_h, c_nom / p.PPM_TO_MOLM3, '-', 'Color', colors_farm{i}, 'LineWidth', 2, ...
+        'DisplayName', sprintf('%s (%d m^3), %d %s', label, V, n, unit_str));
+end
+
+yline(ax1, C_TARGET, '--', 'Color', [0.5, 0.5, 0.5], 'HandleVisibility', 'off');
+text(ax1, 14.5, C_TARGET + 3, '20 ppm target', 'Color', [0.5, 0.5, 0.5], 'FontSize', 8, 'HorizontalAlignment', 'right');
+xlabel(ax1, 'Time (h)', 'FontSize', 11);
+ylabel(ax1, 'Shed NH_3 (ppm)', 'FontSize', 11);
+title(ax1, {'Batch scrubbing with recommended units', '(\Phi 400 mm, 0.4 m/s, shaded: \rho = 0.3–0.7)'}, 'FontSize', 12);
+legend(ax1, 'Location', 'northeast', 'FontSize', 9);
+xlim(ax1, [0, 15]); ylim(ax1, [0, 110]);
+exportgraphics(fig1, 'model7_fig1_batch_scrubbing.png', 'Resolution', 200);
+close(fig1);
+
+% ============================================================
+% Figure 2: batch time vs starting concentration (1,500-bird)
+% ============================================================
+V_1500 = 375;
+c0_sweep = linspace(25, 150, 200);
+unit_options = [2, 3, 4, 5];
+unit_colors = {[86, 180, 233]/255, [0, 114, 178]/255, [230, 159, 0]/255, [213, 94, 0]/255};
+
+fig2 = figure('Units', 'inches', 'Position', [1, 1, 9, 5.5], 'Visible', 'off');
+ax2 = axes(fig2); hold(ax2, 'on'); box(ax2, 'on');
+
+fprintf('\n8-hour crossing concentrations (1,500-bird farm):\n');
+for i = 1:length(unit_options)
+    n_u = unit_options(i); col = unit_colors{i};
+    times = arrayfun(@(c0) batch_time_h(V_1500, c0, C_TARGET, n_u, R_interp_nom, p), c0_sweep);
+    plot(ax2, c0_sweep, times, '-', 'Color', col, 'LineWidth', 2, 'DisplayName', sprintf('%d units', n_u));
+    
+    if any(times > 8.0) && any(times < 8.0)
+        f_interp = griddedInterpolant(c0_sweep, times - 8.0, 'spline');
+        c_cross = fzero(@(x) f_interp(x), [c0_sweep(1), c0_sweep(end)]);
+        fprintf('  %d units: up to %.0f ppm\n', n_u, c_cross);
+        plot(ax2, c_cross, 8.0, 'o', 'Color', col, 'MarkerFaceColor', col, 'MarkerSize', 6, 'HandleVisibility', 'off');
+        text(ax2, c_cross + 4, 8.8, sprintf('%.0f ppm', c_cross), 'Color', col, 'FontSize', 8);
+    end
+end
+
+yline(ax2, 8.0, '--', 'Color', [0.5, 0.5, 0.5], 'HandleVisibility', 'off');
+text(ax2, 148, 8.5, '8-hour run limit', 'Color', [0.5, 0.5, 0.5], 'FontSize', 8, 'HorizontalAlignment', 'right');
+xlabel(ax2, 'Starting NH_3 (ppm)', 'FontSize', 11);
+ylabel(ax2, 'Batch time to 20 ppm (h)', 'FontSize', 11);
+title(ax2, {'Batch time vs starting concentration', '(1,500-bird farm, 375 m^3, \Phi 400 mm units)'}, 'FontSize', 12);
+legend(ax2, 'Location', 'northwest', 'FontSize', 10);
+xlim(ax2, [20, 150]); ylim(ax2, [0, 20]);
+exportgraphics(fig2, 'model7_fig2_time_vs_C0.png', 'Resolution', 200);
+close(fig2);
+
+% ============================================================
+% Figure 3: Sensitivity to ATP and glutamate (1,500-bird, 3 units)
+% ============================================================
+chem_cases = {
+    'Baseline (3.5 mM ATP, 150 mM Glu)', 150.0, 3.5,  [0, 114, 178]/255;
+    '7 mM ATP',                          150.0, 7.0,  [0, 158, 115]/255;
+    '1.75 mM ATP',                       150.0, 1.75, [213, 94, 0]/255;
+    '300 mM Glu',                        300.0, 3.5,  [204, 121, 167]/255
+};
+
+fig3 = figure('Units', 'inches', 'Position', [1, 1, 9, 5.5], 'Visible', 'off');
+ax3 = axes(fig3); hold(ax3, 'on'); box(ax3, 'on');
+t_pts_3 = linspace(0, 15 * 3600, 300);
+
+fprintf('\nSensitivity (1,500-bird farm, 3 units, 80->20 ppm):\n');
+for i = 1:size(chem_cases, 1)
+    lbl = chem_cases{i, 1}; glu = chem_cases{i, 2}; atp = chem_cases{i, 3}; col = chem_cases{i, 4};
+    R_int = build_R_interp_chem(0.5, glu, atp, p);
+    t_val = batch_time_h(V_1500, 80, C_TARGET, 3, R_int, p);
+    fprintf('  %s: %.1f h\n', lbl, t_val);
+    
+    [~, c_sol] = ode15s(@(t, C) ode_trace(C, C_TARGET*p.PPM_TO_MOLM3, 3, V_1500, R_int), t_pts_3, 80*p.PPM_TO_MOLM3, opts);
+    plot(ax3, t_pts_3 / 3600, c_sol / p.PPM_TO_MOLM3, '-', 'Color', col, 'LineWidth', 2, 'DisplayName', lbl);
+end
+
+yline(ax3, C_TARGET, '--', 'Color', [0.5, 0.5, 0.5], 'HandleVisibility', 'off');
+xlabel(ax3, 'Time (h)', 'FontSize', 11);
+ylabel(ax3, 'Shed NH_3 (ppm)', 'FontSize', 11);
+title(ax3, {'Sensitivity of batch scrubbing to ATP and glutamate', '(1,500-bird farm, 3 units)'}, 'FontSize', 12);
+legend(ax3, 'Location', 'northeast', 'FontSize', 9);
+xlim(ax3, [0, 15]); ylim(ax3, [0, 90]);
+exportgraphics(fig3, 'model7_fig3_sensitivity.png', 'Resolution', 200);
+close(fig3);
+
+% ============================================================
+% Figure 4: Units needed within 10 h vs diameter
+% ============================================================
+diameters = [200, 250, 300, 400, 500];
+farm_specs = {
+    '500-bird farm (150 m^3)',   150, 60;
+    '1,500-bird farm (375 m^3)', 375, 80;
+    '3,000-bird farm (750 m^3)', 750, 100
+};
+
+fprintf('\nUnits needed to reach 20 ppm within 10 h:\n');
+fprintf('%8s  %25s  %25s  %25s\n', 'D (mm)', farm_specs{1,1}, farm_specs{2,1}, farm_specs{3,1});
+
+units_mat = zeros(length(diameters), 3);
+for d_idx = 1:length(diameters)
+    D_mm = diameters(d_idx);
+    R_int_d = build_R_interp(D_mm, 0.4, 0.5, p);
+    fprintf('%8d', D_mm);
+    for f_idx = 1:3
+        V = farm_specs{f_idx, 2}; C0 = farm_specs{f_idx, 3};
+        found_n = 99;
+        for n = 1:99
+            if batch_time_h(V, C0, C_TARGET, n, R_int_d, p) <= 10.0
+                found_n = n;
+                break;
+            end
+        end
+        units_mat(d_idx, f_idx) = found_n;
+        fprintf('  %25d', found_n);
+    end
+    fprintf('\n');
+end
+
+fig4 = figure('Units', 'inches', 'Position', [1, 1, 9, 5.5], 'Visible', 'off');
+ax4 = axes(fig4); hold(ax4, 'on'); box(ax4, 'on');
+b_grp = bar(ax4, units_mat, 'grouped');
+for i = 1:3
+    b_grp(i).FaceColor = colors_farm{i};
+    b_grp(i).DisplayName = farm_specs{i, 1};
+    x_end = b_grp(i).XEndPoints;
+    y_end = b_grp(i).YEndPoints;
+    text(ax4, x_end, y_end + 0.4, string(y_end), 'HorizontalAlignment', 'center', ...
+        'VerticalAlignment', 'bottom', 'FontSize', 8, 'Color', colors_farm{i});
+end
+
+xlabel(ax4, 'Cartridge diameter (mm)', 'FontSize', 11);
+ylabel(ax4, 'Units needed', 'FontSize', 11);
+title(ax4, {'Units needed to reach 20 ppm within 10 h', '(\Phi 400 mm, 0.4 m/s, \rho = 0.5)'}, 'FontSize', 12);
+xticks(ax4, 1:length(diameters)); xticklabels(ax4, string(diameters));
+legend(ax4, 'Location', 'northeast', 'FontSize', 9);
+ylim(ax4, [0, max(units_mat(:)) * 1.3]);
+exportgraphics(fig4, 'model7_fig4_units_vs_diameter.png', 'Resolution', 200);
+close(fig4);
+
+% --- Helper Functions ---
+function j = wall_flux(C_gas, v_max_eff, p)
+    jm = v_max_eff * p.L_COAT;
+    k_g = p.SH * p.D_NH3_AIR / p.D_h;
+    a_c = k_g * p.H_CC;
+    b_c = -(k_g * p.H_CC * C_gas - k_g * p.KM_NH3_MOLM3 - jm * p.H_CC);
+    c_c = -k_g * p.KM_NH3_MOLM3 * C_gas;
+    disc = max(b_c^2 - 4 * a_c * c_c, 0);
+    C_s = (-b_c + sqrt(disc)) / (2 * a_c);
+    c_liq = p.H_CC * C_s;
+    f_nh3 = c_liq / (p.KM_NH3_MOLM3 + c_liq);
+    j = v_max_eff * p.L_COAT * f_nh3;
+end
+
+function R = removal_rate_one_unit(C_gas_molm3, D_mm, u_face, v_max_eff, p)
+    D_m = D_mm * 1e-3;
+    Q = u_face * pi * D_m^2 / 4;
+    u_ch = u_face / (p.PACK_FRACTION * p.eps_open);
+    opts = odeset('RelTol', 1e-10, 'AbsTol', 1e-14, 'MaxStep', p.Z_STACK / 50);
+    [~, C_sol] = ode45(@(x, C) ifelse(C <= 0, 0.0, -(4.0 / (p.D_h * u_ch)) * wall_flux(C, v_max_eff, p)), ...
+        [0, p.Z_STACK], C_gas_molm3, opts);
+    C_out = max(C_sol(end), 0.0);
+    R = Q * (C_gas_molm3 - C_out);
+end
+
+function F = build_R_interp(D_mm, u_face, rho, p)
+    v_max_eff = p.ETA_BEAD * p.ETA_COAT * rho * p.A_GS * p.M_LOAD * p.f_Glu * p.f_ATP;
+    c_grid_molm3 = linspace(1, 150, 300) * p.PPM_TO_MOLM3;
+    R_grid = arrayfun(@(c) removal_rate_one_unit(c, D_mm, u_face, v_max_eff, p), c_grid_molm3);
+    F = griddedInterpolant(c_grid_molm3, R_grid, 'spline', 'spline');
+end
+
+function F = build_R_interp_chem(rho, glu_mm, atp_mm, p)
+    f_g = glu_mm / (p.KM_GLU_MM + glu_mm);
+    f_a = atp_mm / (p.KM_ATP_MM + atp_mm);
+    v_max_eff = p.ETA_BEAD * p.ETA_COAT * rho * p.A_GS * p.M_LOAD * f_g * f_a;
+    c_grid_molm3 = linspace(1, 150, 200) * p.PPM_TO_MOLM3;
+    R_grid = arrayfun(@(c) removal_rate_one_unit(c, 400, 0.4, v_max_eff, p), c_grid_molm3);
+    F = griddedInterpolant(c_grid_molm3, R_grid, 'spline', 'spline');
+end
+
+function t_h = batch_time_h(V_shed, C0_ppm, Cf_ppm, n_units, R_interp, p)
+    C0 = C0_ppm * p.PPM_TO_MOLM3;
+    Cf = Cf_ppm * p.PPM_TO_MOLM3;
+    opts = odeset('RelTol', 1e-8, 'AbsTol', 1e-12, 'MaxStep', 600, ...
+        'Events', @(t, C) target_event(t, C, Cf));
+    [t_sol, ~, te] = ode15s(@(t, C) ode_trace(C, Cf, n_units, V_shed, R_interp), [0, 200 * 3600], C0, opts);
+    if ~isempty(te)
+        t_s = te(1);
+    else
+        t_s = t_sol(end);
+    end
+    t_h = t_s / 3600;
+end
+
+function dCdt = ode_trace(C, Cf, n_units, V_shed, R_interp)
+    if C <= Cf
+        dCdt = 0.0;
+    else
+        dCdt = -n_units * R_interp(C) / V_shed;
+    end
+end
+
+function [value, isterminal, direction] = target_event(~, C, Cf)
+    value = C - Cf;
+    isterminal = 1;
+    direction = -1;
+end
+
+function out = ifelse(cond, val_true, val_false)
+    if cond, out = val_true; else, out = val_false; end
+end
